@@ -56,8 +56,8 @@ import uuid # generate uniques ids
 # LLM_MODEL designates the conversational model used for text generation and reasoning.
 # EMB_MODEL designates the embedding model used for transforming text into dense vector
 # representations suitable for similarity search and retrieval.
-LLM_MODEL = "gpt-4.1-nano"           
-EMB_MODEL = "text-embedding-3-small"
+LLM_MODEL = "gpt-4.1"           
+EMB_MODEL = "text-embedding-3-large"
 #%%
 # -----------------------------------------------------------------------------
 # Environment variable resolution
@@ -186,6 +186,11 @@ collection_name = "document_qa_collection"
 # explicitly, no embedding_function is attached at collection instantiation.
 collection = chroma.get_or_create_collection(
     name=collection_name,
+    metadata={
+        "source": "constitución_española.pdf",
+        "embedding_model": EMB_MODEL,
+        "note": "re-ingested with new embedding dimensionality"
+    },
 )
 # Printing the collection name to confirm that the resource is available and accessible.
 # print("Colección lista:", collection.name)
@@ -269,8 +274,8 @@ print(preview_df.to_string(index=False))
 # - chunk_overlap=35 provides shared context across neighbors, mitigating the
 #   risk of losing key information at boundaries.
 token_splitter = SentenceTransformersTokenTextSplitter(
-    chunk_overlap=35,
-    tokens_per_chunk=256,
+    chunk_overlap=64,
+    tokens_per_chunk=384,
 )
 
 # Apply token-level splitting to each character-level segment.
@@ -458,6 +463,11 @@ for qi, q_text in enumerate(queries):
         })
 
 raw_hits.sort(key=lambda h: h["distance"]) # sort by distance 
+for h in raw_hits:
+    h["similarity"] = 1.0 - float(h["distance"])
+# Filtering weekmatches
+DISTANCE_MAX = 1.05   # e.g., keep only distance <= 1.05
+raw_hits = [h for h in raw_hits if h["distance"] <= DISTANCE_MAX]
 print(f"[retrieval] queries={len(queries)}, per_query_k={N_RESULTS}, total_hits={len(raw_hits)}")
 
 # %%
