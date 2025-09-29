@@ -389,7 +389,7 @@ def expand_queries(user_question: str) -> list[str]:
     return [user_question] + alts
 
 #%%
-user_question = "¿Qué dice la Constitución sobre la soberanía nacional en España?"
+user_question = "¿Cuál es la lengua oficial del Estado y qué establece la Constitución sobre ella?"
 queries = expand_queries(user_question)
 
 # %%
@@ -420,5 +420,139 @@ query_vectors = [
 for i, item in enumerate(query_vectors):
     snippet = item["query"][:120].replace("\n", " ")
     print(f"- q{i}: {snippet}{'...' if len(item['query']) > 120 else ''}")
+
+# %%
+# -----------------------------------------------------------------------------
+# Multi-query retrieval using precomputed embeddings (single batched call)
+# -----------------------------------------------------------------------------
+# Using the four query embeddings at once to retrieve the top-2 passages per query.
+# Chroma returns parallel lists per issued query; results are normalized into a flat list.
+
+# Defensive checks: embeddings and queries must align 1:1.
+assert len(query_embeddings) == len(queries), "Queries and embeddings must align."
+# Number of retrivals we want
+N_RESULTS = 5
+
+# Issue a single batched similarity search: one embedding per expanded query.
+retrieval = collection.query(
+    query_embeddings=query_embeddings,           # List[List[float]] (e.g., 4 vectors: original + 3 variants)
+    n_results=N_RESULTS,                                 # Two hits per query → ~8 raw hits total
+    include=["documents", "metadatas", "distances"],
+)
+
+# Normalize results into a flat structure for downstream processing.
+raw_hits = []
+for qi, q_text in enumerate(queries):
+    ids   = retrieval.get("ids", [[]])[qi]
+    docs  = retrieval.get("documents", [[]])[qi]
+    metas = retrieval.get("metadatas", [[]])[qi]
+    dists = retrieval.get("distances", [[]])[qi]
+
+    for i, doc_id in enumerate(ids):
+        raw_hits.append({
+            "id": doc_id,           # unique identifier of the retrieved chunk
+            "text": docs[i],        # retrieved passage text
+            "metadata": metas[i],   # provenance (e.g., chunk_index, source)
+            "distance": dists[i],   # similarity distance (lower is closer)
+            "from_query": q_text,   # which expanded query produced this hit
+        })
+
+raw_hits.sort(key=lambda h: h["distance"]) # sort by distance 
+print(f"[retrieval] queries={len(queries)}, per_query_k={N_RESULTS}, total_hits={len(raw_hits)}")
+
+# %%
+# -----------------------------------------------------------------------------
+# Deduplicate by id and keep top-N closest hits
+# -----------------------------------------------------------------------------
+TOP_N = 8
+seen = set()
+unique_hits = []
+for h in raw_hits:
+    if h["id"] in seen:
+        continue
+    seen.add(h["id"])
+    unique_hits.append(h)
+
+# Keep only the TOP_N after deduplication
+top_hits = unique_hits[:TOP_N]
+print(f"total_unique={len(unique_hits)}, top_used={len(top_hits)}")
+
+# %%
+# -----------------------------------------------------------------------------
+# Pretty-print top_hits in full detail
+# -----------------------------------------------------------------------------
+for i, h in enumerate(top_hits, 1):
+    print(f"\n[Hit {i}]")
+    print(f"  id        : {h['id']}")
+    print(f"  distance  : {h['distance']:.4f}")
+    print(f"  from_query: {h['from_query']}")
+    print(f"  metadata  : {h['metadata']}")
+    print("  text      :")
+    print(h["text"])
+    print("-" * 80)
+
+# %%
+# -----------------------------------------------------------------------------
+# Build grounded context from top hits
+# -----------------------------------------------------------------------------
+# Constructing a compact, traceable context block from the selected passages.
+# Each passage is preceded by a header carrying provenance (id and chunk_index),
+# enabling later citation and auditability in the final answer.
+def build_context_block(hits: list[dict], max_chars: int = 12000) -> str:
+    parts = []
+    total = 0
+    for i, h in enumerate(hits, 1):
+        header = f"[Passage {i} | id={h['id']} | chunk_index={h['metadata'].get('chunk_index', 'NA')}]"
+        body = (h["text"] or "").strip()
+        segment = f"{header}\n{body}\n"
+        if total + len(segment) > max_chars:
+            break
+        parts.append(segment)
+        total += len(segment)
+    return "\n---\n".join(parts)
+
+# Materialize the context from the already prepared `top_hits`.
+context_block = build_context_block(top_hits)
+print("\n[context preview]\n")
+print(context_block[:1200] + ("\n...\n" if len(context_block) > 1200 else ""))
+
+# %%
+# -----------------------------------------------------------------------------
+# Answer strictly using provided context
+# -----------------------------------------------------------------------------
+# The answering prompt enforces grounding: the model must rely only on the
+# supplied passages. If the context is insufficient, the answer should explicitly
+# acknowledge that limitation. Output is requested in Spanish to match the use case.
+def answer_with_context(user_question: str, context_block: str) -> str:
+    system_msg = (
+        "Responde estrictamente usando ÚNICAMENTE los pasajes de contexto proporcionados. "
+        "Si la información necesaria no está en el contexto, indica claramente que no se puede "
+        "determinar la respuesta a partir del contexto. Cita entre corchetes el índice del pasaje "
+        "relevante cuando corresponda (por ejemplo, [Passage 2]). Responde en español, de forma concisa y precisa."
+    )
+    user_msg = (
+        f"Pregunta:\n{user_question}\n\n"
+        f"Pasajes de contexto:\n{context_block}\n\n"
+        "Instrucciones: Usa solo el contexto anterior. Si no alcanza para responder con seguridad, dilo explícitamente."
+    )
+    resp = llm_client.chat.completions.create(
+        model=LLM_MODEL,
+        temperature=0.1,
+        max_tokens=400,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+    return resp.choices[0].message.content.strip()
+
+# Example: synthesize the final answer grounded in `top_hits`.
+final_answer = answer_with_context(
+    user_question=user_question,   # reuse the question you set earlier
+    context_block=context_block
+)
+
+print("\n[final answer]\n")
+print(final_answer)
 
 # %%
