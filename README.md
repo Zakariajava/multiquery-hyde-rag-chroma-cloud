@@ -1,4 +1,4 @@
-# Multi-Query + HyDE RAG with Chroma Cloud
+# Multi-Query + RAG with Chroma Cloud
 
 This project implements a Retrieval-Augmented Generation (RAG) pipeline using **OpenAI models** for language generation and embeddings, combined with **Chroma Cloud** as the vector database. The workflow is designed to improve retrieval quality through **multi-query expansion** and optional.
 
